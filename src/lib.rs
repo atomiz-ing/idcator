@@ -1,6 +1,7 @@
-use std::{collections::HashSet, fmt::Display, hash::Hasher, marker::PhantomData};
+use std::{collections::HashSet, fmt::Display, hash::{Hash, Hasher}, marker::PhantomData, time::Duration};
 
 use rand::{distributions::Standard, thread_rng, Rng};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // pub trait Space {
@@ -96,33 +97,59 @@ use thiserror::Error;
 //     bytes[bytes.len()]
 // }
 
-// pub fn testing_id() {
-//     let mut rng = thread_rng();
-// }
-
 // New
 
 #[derive(Debug, Error)]
 pub enum Errors {
-	#[error("Missing <{0}> byte from byte-array")]
-	MissingIndicatorByte(u8),
-	#[error("{0}")]
-	Custom(String),
+	#[error("")]
+	NotOnlyHexadecimal,
+	#[error("")]
+	TooShort(usize),
+	#[error("")]
+	TooLong(usize),
+    #[error("Missing <{0}> byte from byte-array")]
+    MissingIndicatorByte(u8),
+    #[error("{0}")]
+    Custom(String),
 }
 
 impl Errors {
-	pub fn new<S: AsRef<str>>(mesg: S) -> Self {Self::Custom(mesg.as_ref().to_string())}
+    pub fn new<S: AsRef<str>>(mesg: S) -> Self {
+        Self::Custom(mesg.as_ref().to_string())
+    }
 }
 
+///TODO: Better, more specific name
 pub trait Space {
     fn indicator() -> u8;
+
+    fn indicator_char() -> char {
+        char::from(Self::indicator())
+    }
 
     fn length() -> usize {
         16
     }
+
+	fn str_length() -> usize {
+		Self::length() * 2
+	}
+	
+	/// Don't know if this works
+    fn total_number_ids() -> usize {
+        256 ^ Self::length()
+    }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Hash)]
+/// Idea is to use this to estimate a good length for an id-space
+pub fn napkin_math(interval: Duration, per: u64) -> usize {
+    let mut length: usize = 2;
+    while true {}
+    todo!()
+}
+
+#[cfg(feature = "serde_feature")]
+#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Hash)]
 pub struct Id<S: Space> {
     indicator: u8,
     bytes: Vec<u8>,
@@ -147,19 +174,32 @@ impl<S: Space> Id<S> {
             return Err(Errors::new("incorrect-indicator"));
         };
 
-        Ok(Self::new(bytes.to_vec()))
+        Ok(Self::new(bytes[1..=S::length()].to_vec()))
     }
 
     /// Should be checked at compile time, so always true
     pub fn same_space(&self, _other: Id<S>) -> bool {
         true
     }
-	
-	pub fn random() -> Self {
-		let randomized = thread_rng().sample_iter(Standard).take(S::length()).collect();
-		Self::new(randomized)
-	}
-	
+
+    pub fn random() -> Self {
+        let randomized = thread_rng()
+            .sample_iter(Standard)
+            .take(S::length())
+            .collect();
+        Self::new(randomized)
+    }
+}
+
+impl<S: Space> Display for Id<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = format!("{:0>2x}", self.indicator);
+        for byte in self.bytes.iter() {
+            let st = format!("{:0>2x}", byte);
+            out.push_str(&st);
+        }
+        write!(f, "{out}")
+    }
 }
 
 impl<S: Space> PartialEq<Vec<u8>> for Id<S> {
@@ -180,6 +220,27 @@ impl<S: Space> TryFrom<&[u8]> for Id<S> {
     }
 }
 
+impl<S: Space> TryFrom<&str> for Id<S> {
+    type Error = Errors;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        // if !value.starts_with(S::indicator_char()) {
+        //     return Err(Errors::MissingIndicatorByte(S::indicator()));
+        // };
+
+        // if !value.len() == S::length() {
+        //     return Err(Errors::new("Wrong length"));
+        // };
+		
+        if !value.chars().all(|x| x.is_ascii_hexdigit()) {
+            return Err(Errors::new("Not all hexadecimal"));
+        };
+
+		let bytes = value.as_bytes();
+		Id::create(bytes.to_vec())
+    }
+}
+
 pub struct TestingSpace;
 
 impl Space for TestingSpace {
@@ -194,22 +255,59 @@ impl Space for TestingSpace {
 
 pub type TestingId = Id<TestingSpace>;
 
-#[derive(Debug, Clone)]
-pub struct Ids<S: Space>(HashSet<Id<S>>);
+#[cfg(feature = "serde_feature")]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Ids<S: Space + Hash + Eq>(HashSet<Id<S>>);
 
-impl<S: Space> Ids<S> {
-	pub fn len(&self) -> usize {self.0.len()}
-	pub fn is_empty(&self) -> bool {self.0.is_empty()}
+impl<S: Space + Hash + Eq> Ids<S> {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
-impl<S: Space> PartialEq for Ids<S> {
+impl<S: Space + Hash + Eq> PartialEq for Ids<S> {
     fn eq(&self, other: &Self) -> bool {
-		if self.len() != other.len() {
-			return false
-		};
-		
-		let zipped: Vec<(&Id<S>, &Id<S>)> = self.0.iter().zip(other.0.iter()).collect();
-		//        self.0 == other.0
-		todo!()
+        if self.len() != other.len() {
+            return false;
+        };
+
+        let zipped: Vec<(&Id<S>, &Id<S>)> = self.0.iter().zip(other.0.iter()).collect();
+
+        todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+	use rand::distributions::Alphanumeric;
+
+use super::*;
+
+    #[test]
+    fn gen_rand_id() -> Result<(), Errors> {
+		for _ in 0..20 {
+			let mut out = vec![TestingSpace::indicator()];
+			let mut bytes: Vec<u8> = thread_rng().sample_iter(Standard).take(TestingSpace::length()).collect();
+			
+			out.append(&mut bytes);
+			let strng = {
+				// let mut o = String::new();
+				// for b in out.iter() {
+				// 	let s = format!("{b:0>2x}");
+				// 	o.push_str(&s);
+				// }
+				// o
+				out.iter().fold("".to_string(), |x,y| format!("{x}{y:0>2x}"))
+			};
+			let rand_t_id: Id<TestingSpace> = Id::create(out.clone())?;
+			eprintln!("id: {}", rand_t_id);
+			assert!(rand_t_id.to_string() == strng, "String representations do not match");
+			assert!(rand_t_id.to_string().len() == TestingSpace::str_length() + 2, "Wrong string lengths")
+		}
+		Ok(())
 	}
+
 }
